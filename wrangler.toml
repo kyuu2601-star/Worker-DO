@@ -8,4 +8,4 @@ class_name = "FarmRoomDurableObject"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["FarmRoomDurableObject"]
+new_sqlite_classes = ["FarmRoomDurableObject"]  # 🌟 ĐÃ SỬA: Thêm chữ _sqlite vào đây là xong!
