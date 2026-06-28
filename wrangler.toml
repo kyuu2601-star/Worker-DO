@@ -1,0 +1,11 @@
+name = "sync-sheet-worker"
+main = "index.js"
+compatibility_date = "2026-06-28"
+
+[[durable_objects.bindings]]
+name = "FARM_ROOM_DO"
+class_name = "FarmRoomDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["FarmRoomDurableObject"]
