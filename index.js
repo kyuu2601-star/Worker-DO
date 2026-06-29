@@ -83,9 +83,11 @@ wss.on('connection', (ws, req) => {
                     } catch (e) {
                       room.inventory = {};
                     }
+                    console.log(`📦 [D1 LOAD OK] Đã hốt trọn dữ liệu phòng ${roomId} lên RAM Render!`);
+                  } else {
+                    console.warn(`⚠️ [D1 LOAD FAIL] Worker từ chối cấp dữ liệu gốc phòng ${roomId}:`, json.message || "Không rõ lý do");
                   }
                   room.isLoadedFromD1 = true;
-                  console.log(`📦 [D1 LOAD OK] Đã hốt trọn dữ liệu phòng ${roomId} lên RAM Render!`);
                 })
                 .catch(err => {
                   console.error(`🚨 [D1 LOAD ERROR] Lỗi bốc dữ liệu phòng ${roomId}, dùng tạm mặc định:`, err);
@@ -281,9 +283,11 @@ function saveRoomToD1Background(roomId, room) {
   .then(json => {
     if (json.success) {
       console.log(`✅ [Write-Behind Thành công] Đã đồng bộ tài sản phòng ${roomId} về D1 an toàn.`);
+    } else {
+      console.error(`❌ [Write-Behind BỊ TỪ CHỐI] Cloudflare Worker báo lỗi lưu:`, json.message || "Không rõ lý do");
     }
   })
-  .catch(err => console.error(`⚠️ [Write-Behind Thất bại] Lỗi lưu ngầm nông trại về Cloudflare:`, err));
+  .catch(err => console.error(`🚨 [Write-Behind SẬP MẠCH] Lỗi kết nối HTTP truyền tải về Cloudflare:`, err));
 }
 
 // Bật hạ tầng lò sưởi nguồn sảnh mạng lên mây
