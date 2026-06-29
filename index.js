@@ -1,601 +1,293 @@
-// ==========================================================================
-// 🏰 CLOUDFLARE WORKER GATEWAY ENGINE - FULL INTEGRATED EDITION (2026)
-// ==========================================================================
+const { createServer } = require('http');
+const { WebSocketServer, WebSocket } = require('ws');
 
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+// ==========================================
+// 🧠 KHO LƯU TRỮ TRẠNG THÁI TRÊN RAM (IN-MEMORY STATE)
+// Đảm bảo truy xuất tốc độ vài mili-giây, triệt tiêu delay Disk I/O
+// ==========================================
+const rooms = {};
 
-    // 🌐 XỬ LÝ CORS CHO COCOS CREATOR (BẮT BUỘC)
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-          "Access-Control-Max-Age": "86400",
-        },
-      });
-    }
-
-    // 🔥 👉 CỔNG MẠNG 0: BẪY WEBSOCKET PHÒNG NÔNG TRẠI CHUNG (DURABLE OBJECT BINDING)
-    if (url.pathname.startsWith("/farm-ws/")) {
-      if (request.headers.get("Upgrade") !== "websocket") {
-        return new Response("Expected WebSocket Upgrade", { status: 426 });
-      }
-      
-      const worldId = url.pathname.split("/")[2] || "global_room_01";
-      const doId = env.FARM_ROOM_DO.idFromName(worldId);
-      const doStub = env.FARM_ROOM_DO.get(doId);
-
-      return doStub.fetch(request);
-    }
-
-    const db = env.D1;
-
-    // ==========================================
-    // CỔNG 1: ĐĂNG NHẬP (LOGIN) - ĐÃ UPGRADE NÔNG TRẠI
-    // ==========================================
-    if ((url.pathname === "/login" || url.pathname === "/") && request.method === "POST") {
-      try {
-        const params = await request.json();
-        const username = params.username;
-        const password = params.password;
-
-        if (!username || !password) {
-          return errorResponse("Thiếu tài khoản hoặc mật khẩu!");
-        }
-
-        const user = await db.prepare("SELECT * FROM users WHERE username = ?").bind(username.toString().trim()).first();
-
-        if (!user) {
-          return errorResponse("Không tìm thấy tài khoản!");
-        }
-
-        if (user.password.toString().trim() !== password.toString().trim()) {
-          return errorResponse("Sai mật khẩu!");
-        }
-
-        // Trả thêm 4 chỉ số Nông trại mới về cho Cocos Creator dựng sảnh
-        return jsonResponse({
-          success: true,
-          message: "Đăng nhập thành công!",
-          data: {
-            username: user.username,
-            coins: user.coins,
-            gender: user.gender,
-            captured: user.captured,
-            energy: user.energy,
-            avatar: user.avatar,
-            total_coins: user.total_coins,
-            // 🆕 Các trường bổ sung cho thế giới mở
-            farm_energy: user.farm_energy !== null ? user.farm_energy : 100,
-            upgrade_coins: user.upgrade_coins !== null ? user.upgrade_coins : 0,
-            current_skin_id: user.current_skin_id || '',
-            current_world_id: user.current_world_id || 'global_room_01'
-          }
-        });
-      } catch (err) {
-        return errorResponse("Lỗi hệ thống đăng nhập: " + err.message);
-      }
-    }
-    // trigger mạng nông trại
-    // ==========================================
-    // CỔNG 2: LƯU GAME REALTIME (SAVE) - ĐÃ UPGRADE NÔNG TRẠI SẠCH LỖI NULL
-    // ==========================================
-    if ((url.pathname === "/save" || url.pathname === "/") && request.method === "POST") {
-      try {
-        const params = await request.json();
-        const username = params.username;
-        const coins = params.coins;
-        const gender = params.gender;
-        const captured = params.captured;
-        const energy = params.energy;
-
-        if (!username) return errorResponse("Thiếu Username để lưu game!");
-
-        const newCoins = parseInt(coins) || 0;
-        
-        // Đọc full thông số cũ lên làm giá trị dự phòng nếu gói tin cứu hộ từ BattleStage không gửi dữ liệu vườn
-        const userObj = await db.prepare("SELECT coins, total_coins, farm_energy, upgrade_coins, current_skin_id, current_world_id FROM users WHERE username = ?").bind(username.toString().trim()).first();
-        
-        const oldCoins = userObj ? (parseInt(userObj.coins) || 0) : 0;
-        const oldTotal = userObj ? (parseInt(userObj.total_coins) || 0) : 0;
-        const calculatedTotal = oldTotal + (newCoins > oldCoins ? (newCoins - oldCoins) : 0);
-        const finalEnergy = parseInt(energy) || 0;
-
-        // Thuật toán gài mốc dự phòng bảo hiểm RAM 100% chống đè dữ liệu rỗng
-        const finalFarmEnergy = params.farm_energy !== undefined ? parseInt(params.farm_energy) : (userObj ? userObj.farm_energy : 100);
-        const finalUpgradeCoins = params.upgrade_coins !== undefined ? parseInt(params.upgrade_coins) : (userObj ? userObj.upgrade_coins : 0);
-        const finalSkinId = params.current_skin_id !== undefined ? params.current_skin_id : (userObj ? userObj.current_skin_id : '');
-        const finalWorldId = params.current_world_id !== undefined ? params.current_world_id : (userObj ? userObj.current_world_id : 'global_room_01');
-
-        await db.prepare(`
-          UPDATE users SET 
-            coins = ?, 
-            gender = ?, 
-            captured = ?, 
-            energy = ?, 
-            total_coins = ?,
-            last_save_time = ?,
-            farm_energy = ?,
-            upgrade_coins = ?,
-            current_skin_id = ?,
-            current_world_id = ?
-          WHERE username = ?
-        `).bind(
-          newCoins,
-          gender || '',
-          captured || '{}',
-          finalEnergy,
-          calculatedTotal,
-          Date.now(),
-          finalFarmEnergy,
-          finalUpgradeCoins,
-          finalSkinId,
-          finalWorldId,
-          username.toString().trim()
-        ).run();
-
-        ctx.waitUntil((async () => {
-          const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzkXP46IjCrgdRjFq9hH1mQ8YHljlsUJWwk63wYIDjkaZ5S0Ua9Juox9CokgFt0MKs/exec";
-          try {
-            let sheetGender = gender ? gender.toString().toUpperCase().trim() : "";
-            if (sheetGender === "MALE") sheetGender = "M";
-            if (sheetGender === "FEMALE") sheetGender = "F";
-
-            await fetch(APPS_SCRIPT_URL, {
-              method: "POST",
-              headers: { "Content-Type": "text/plain;charset=utf-8" },
-              body: JSON.stringify({
-                action: "save",
-                username: username.toString().trim(),
-                coins: calculatedTotal,
-                gender: sheetGender,
-                captured: captured || '{}',
-                energy: finalEnergy
-              })
-            });
-          } catch (sheetErr) {
-            console.error("[Chạy ngầm] Lỗi tự động đồng bộ dữ liệu về Sheet:", sheetErr);
-          }
-        })());
-
-        return jsonResponse({ success: true, message: "Đã lưu vào D1 thành công rực rỡ! (Đang chạy ngầm đồng bộ full thông số về Sheet)" });
-      } catch (err) {
-        return errorResponse("Lỗi lưu game: " + err.message);
-      }
-    }
-
-    // ==========================================
-    // CỔNG 3: ĐỒNG BỘ TỪ SHEET MỚI (SYNC-SHEET)
-    // ==========================================
-    if (url.pathname === "/sync-sheet") {
-      const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT-EFZn4iPTyVHW35NtYDWCwVH5mt6Vuw9kbAFNMm8CkLXzu31QdoK7vW18NdlKLXKKgZIH9YYFKqoh/pub?gid=1029675025&single=true&output=csv"; 
-      
-      try {
-        const response = await fetch(SHEET_CSV_URL);
-        const csvText = await response.text();
-        const lines = csvText.split(/\r?\n/).filter(line => line.trim() !== "");
-
-        if (lines.length <= 1) {
-          return errorResponse("Sheet trống hoặc sai định dạng!");
-        }
-
-        let count = 0;
-
-        for (let i = 1; i < lines.length; i++) {
-          const matches = lines[i].match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || [];
-          const values = matches.map(v => v.trim().replace(/^"|"$/g, "").replace(/""/g, '"'));
-          
-          if (values.length < 2) continue;
-          
-          const username = values[0];
-          const password = values[1];
-          const coins = parseInt(values[2]) || 0;
-          const gender = values[3] || '';
-          
-          let captured = values[4] || '{}';
-          if (captured.startsWith('{') && !captured.endsWith('}')) captured = captured + '}';
-          captured = captured.replace(/""/g, '"');
-          
-          const energy = parseInt(values[5]) || 0;
-          const avatar = values[6] || '';
-          const total_coins = parseInt(values[7]) || coins;
-
-          if (!username) continue;
-
-          await db.prepare(`
-            INSERT INTO users (username, password, coins, gender, captured, energy, avatar, total_coins)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(username) DO UPDATE SET
-              password = excluded.password, 
-              coins = excluded.coins, 
-              gender = excluded.gender,
-              captured = excluded.captured, 
-              energy = excluded.energy, 
-              avatar = excluded.avatar, 
-              total_coins = excluded.total_coins
-          `).bind(username, password, coins, gender, captured, energy, avatar, total_coins).run();
-          
-          count++;
-        }
-        
-        return jsonResponse({ success: true, message: `Đồng bộ hoàn tất! Đã nạp thành công ${count} tài khoản từ Sheet mới vào D1.` });
-      } catch (error) {
-        return errorResponse("Lỗi cào dữ liệu từ Sheet mới: " + error.message);
-      }
-    }
-
-    // ==========================================
-    // CỔNG 4: XUẤT DỮ LIỆU TỪ D1 VỀ LẠI GOOGLE SHEET
-    // ==========================================
-    if (url.pathname === "/export-sheet") {
-      const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzkXP46IjCrgdRjFq9hH1mQ8YHljlsUJWwk63wYIDjkaZ5S0Ua9Juox9CokgFt0MKs/exec";
-
-      try {
-        const { results } = await db.prepare("SELECT * FROM users").all();
-
-        if (!results || results.length === 0) {
-          return errorResponse("Database D1 đang trống rỗng, không có gì để xuất!");
-        }
-
-        let successCount = 0;
-
-        for (const user of results) {
-          try {
-            let sheetGender = user.gender ? user.gender.toString().toUpperCase().trim() : "";
-            if (sheetGender === "MALE") sheetGender = "M";
-            if (sheetGender === "FEMALE") sheetGender = "F";
-
-            await fetch(APPS_SCRIPT_URL, {
-              method: "POST",
-              headers: { "Content-Type": "text/plain;charset=utf-8" },
-              body: JSON.stringify({
-                action: "save",
-                username: user.username,
-                coins: user.total_coins,
-                gender: sheetGender,
-                captured: user.captured,
-                energy: user.energy
-              })
-            });
-            successCount++;
-          } catch (singleErr) {
-            console.error(`Lỗi dòng user ${user.username}:`, singleErr);
-          }
-        }
-
-        return jsonResponse({ 
-          success: true, 
-          message: `Xuất dữ liệu hoàn tất! Đã cập nhật thành công ${successCount}/${results.length} tài khoản từ D1 đè ngược về Google Sheet.` 
-        });
-
-      } catch (error) {
-        return errorResponse("Thất bại khi đẩy dữ liệu về Sheet: " + error.message);
-      }
-    }
-
-    // ==========================================
-    // 💬 CỔNG CHAT 1: GỬI TIN NHẮN (SEND-CHAT)
-    // ==========================================
-    if (url.pathname === "/send-chat" && request.method === "POST") {
-      try {
-        const params = await request.json();
-        let roomId = params.room_id ? params.room_id.toString().trim() : "GLOBAL";
-        const sender = params.sender ? params.sender.toString().trim() : "Unknown";
-        const message = params.message ? params.message.toString().trim() : "";
-
-        if (!message) return errorResponse("Nội dung tin nhắn trống rỗng!");
-
-        if (roomId !== "GLOBAL" && roomId.includes("_")) {
-          const parts = roomId.split("_").map(p => p.trim()).sort();
-          roomId = parts[0] + "_" + parts[1];
-        }
-
-        await db.prepare(`
-          INSERT INTO chat_messages (room_id, sender, message, timestamp)
-          VALUES (?, ?, ?, ?)
-        `).bind(roomId, sender, message, Date.now()).run();
-
-        return jsonResponse({ success: true, message: "Tin nhắn gửi thành công!" });
-      } catch (err) {
-        return errorResponse("Lỗi hệ thống gửi tin: " + err.message);
-      }
-    }
-
-    // ==========================================
-    // 💬 CỔNG CHAT 2: TẢI TIN VÀ LEFT JOIN (GET-CHAT)
-    // ==========================================
-    if (url.pathname === "/get-chat" && request.method === "GET") {
-      try {
-        let roomId = url.searchParams.get("room_id") || "GLOBAL";
-        roomId = roomId.toString().trim();
-        
-        if (roomId !== "GLOBAL" && roomId.includes("_")) {
-          const parts = roomId.split("_").map(p => p.trim()).sort();
-          roomId = parts[0] + "_" + parts[1];
-        }
-
-        const { results } = await db.prepare(`
-          SELECT 
-            c.sender, 
-            c.message, 
-            c.timestamp,
-            u.avatar
-          FROM chat_messages c
-          LEFT JOIN users u ON c.sender = u.username
-          WHERE c.room_id = ? 
-          ORDER BY c.id DESC LIMIT 50
-        `).bind(roomId).all();
-
-        return jsonResponse({ success: true, data: results ? results.reverse() : [] });
-      } catch (err) {
-        return errorResponse("Lỗi hệ thống tải tin: " + err.message);
-      }
-    }
-
-    // ==========================================
-    // 💬 CỔNG CHAT 3: TÌM USER (SEARCH-USER)
-    // ==========================================
-    if (url.pathname === "/search-user" && request.method === "GET") {
-      try {
-        const targetUser = url.searchParams.get("username");
-        if (!targetUser) return errorResponse("Thiếu tên tài khoản cần tìm!");
-
-        const user = await db.prepare("SELECT username FROM users WHERE username = ?").bind(targetUser.toString().trim()).first();
-
-        if (!user) {
-          return jsonResponse({ success: false, message: "Không tìm thấy bạn học này!" });
-        }
-        return jsonResponse({ success: true, username: user.username });
-      } catch (err) {
-        return errorResponse("Lỗi hệ thống tìm bạn: " + err.message);
-      }
-    }
-
-    // ==========================================
-    // 💬 CỔNG CHAT 4: LẤY DANH SÁCH BẠN CHAT (/get-private-friends)
-    // ==========================================
-    if (url.pathname === "/get-private-friends" && request.method === "GET") {
-      try {
-        const myUser = url.searchParams.get("username");
-        if (!myUser) return errorResponse("Thiếu Username để quét danh sách bạn!");
-
-        const matchPattern = `%${myUser.toString().trim()}%`;
-        const { results } = await db.prepare(`
-          SELECT DISTINCT room_id FROM chat_messages 
-          WHERE room_id LIKE ? AND room_id != 'GLOBAL'
-        `).bind(matchPattern).all();
-
-        const friendSet = new Set();
-        if (results && results.length > 0) {
-          results.forEach(row => {
-            const room = row.room_id.toString();
-            if (room.includes("_")) {
-              const parts = room.split("_");
-              parts.forEach(p => {
-                const cleaned = p.trim();
-                if (cleaned !== "" && cleaned !== myUser.toString().trim()) {
-                  friendSet.add(cleaned);
-                }
-              });
-            }
-          });
-        }
-
-        return jsonResponse({ success: true, data: Array.from(friendSet) });
-      } catch (err) {
-        return errorResponse("Lỗi bóc tách danh sách bạn chat: " + err.message);
-      }
-    }
-
-    // ==========================================
-    // 🛠️ CỔNG ADMIN 1: LẤY TOÀN BỘ DỮ LIỆU USER
-    // ==========================================
-    if (url.pathname === "/admin/get-all-users" && request.method === "GET") {
-      try {
-        const { results } = await db.prepare("SELECT * FROM users ORDER BY username ASC").all();
-        return jsonResponse({ success: true, data: results || [] });
-      } catch (err) {
-        return errorResponse("Lỗi lấy danh sách user: " + err.message);
-      }
-    }
-
-    // ==========================================
-    // 🛠️ CỔNG ADMIN 2: BƠM ĐỒ CHO USER (ADMIN/CHEAT)
-    // ==========================================
-    if (url.pathname === "/admin/cheat" && request.method === "POST") {
-      try {
-        const body = await request.json();
-        const { username, mon_id, mon_qty, coin, energy } = body;
-
-        const userQuery = await db.prepare("SELECT * FROM users WHERE username = ?").bind(username).first();
-        if (!userQuery) return errorResponse("User không tồn tại!");
-
-        let newCoins      = (userQuery.coins       || 0) + (Number(coin)    || 0);
-        let newTotalCoins = (userQuery.total_coins  || 0) + (Number(coin)    || 0);
-        let newEnergy     = (userQuery.energy       || 0) + (Number(energy)  || 0);
-
-        let capturedData = {};
-        try { capturedData = JSON.parse(userQuery.captured || '{}'); } catch (e) {}
-
-        if (mon_id && mon_qty) {
-          let currentQty = capturedData[mon_id] || 0;
-          capturedData[mon_id] = currentQty + Number(mon_qty);
-        }
-
-        await db.prepare(
-          `UPDATE users SET coins = ?, total_coins = ?, energy = ?, captured = ? WHERE username = ?`
-        ).bind(newCoins, newTotalCoins, newEnergy, JSON.stringify(capturedData), username).run();
-
-        return jsonResponse({ success: true, message: `Đã bơm đồ thành công cho ${username}` });
-      } catch (err) {
-        return errorResponse("Lỗi hệ thống cheat: " + err.message);
-      }
-    }
-
-    return new Response("Cổng API Mon English không hợp lệ", { status: 404 });
-  },
-
-  // ==========================================
-  // ⚡ CRON TRIGGER: HỒI NĂNG LƯỢNG CHIẾN ĐẤU CŨ
-  // ==========================================
-  async scheduled(event, env, ctx) {
-    const db = env.D1;
-    ctx.waitUntil((async () => {
-      try {
-        await db.prepare("UPDATE users SET energy = energy + 1 WHERE energy < 40").run();
-        console.log("[Hẹn giờ] Đã cộng 1 năng lượng thành công cho toàn bộ tài khoản học sinh.");
-      } catch (err) {
-        console.error("[Hẹn giờ] Thất bại khi hồi năng lượng cục bộ D1:", err);
-      }
-    })());
-  }
+// Cấu hình công thức nâng cấp nhà chung đồng bộ 100% với Frontend Cocos
+const UPGRADE_FORMULAS = {
+  1: { items: ["wood_log", "mine_stone"], amounts: [4, 4] },
+  2: { items: ["wood_log", "mine_iron", "crop_potato"], amounts: [10, 5, 8] },
+  3: { items: ["mine_gold", "meat_beef", "fast_pizza"], amounts: [5, 10, 5] }
 };
 
-// ==========================================================================
-// 🧠 ĐẠI NÃO ĐIỀU PHỐI PHÒNG CHƠI TRÊN RAM: DURABLE OBJECT CLASS
-// ==========================================================================
-export class FarmRoomDurableObject {
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-    
-    this.roomSessions = new Map(); 
-    this.worldId = "";
-    this.houseLevel = 1;
-    this.sharedInventory = {};
+// Đọc địa chỉ link mây Worker từ biến môi trường Render đã setup ở turn trước
+const CF_WORKER_URL = process.env.CF_WORKER_URL || "https://sync-sheet-worker.kyuu2601.workers.dev";
+
+// ==========================================
+// 🛡️ HẠ TẦNG HTTP SERVER BẢO HIỂM CHO RENDER.COM
+// Render Free yêu cầu phải phản hồi cổng HTTP để nghiệm thu (Health Check), nếu không sẽ báo lỗi Deploy Timeout!
+// ==========================================
+const server = createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+    res.end('Sảnh mạng Mon English Realtime đang thông suốt rực rỡ!');
+  } else {
+    res.writeHead(404);
+    res.end();
   }
+});
 
-  async fetch(request) {
-    const url = new URL(request.url);
-    this.worldId = url.pathname.split("/")[2] || "global_room_01";
+const wss = new WebSocketServer({ server });
 
-    if (Object.keys(this.sharedInventory).length === 0) {
-      await this.loadWorldStateFromD1();
-    }
+// ==========================================
+// 📡 ĐƯỜNG ỐNG TIẾP NHẬN MẠCH KẾT NỐI WEBSOCKET
+// ==========================================
+wss.on('connection', (ws, req) => {
+  // Trích xuất worldId (roomId) từ URL đường dẫn của Cocos bắn lên (Ví dụ: /farm-ws/global_room_01)
+  const urlParts = req.url.split('/');
+  const roomId = urlParts[urlParts.length - 1] || 'global_room_01';
+  
+  let myUsername = null;
 
-    const pair = new WebSocketPair();
-    const [clientSocket, serverSocket] = Object.values(pair);
+  console.log(`🌐 [Kết nối mới] Một thiết bị vừa cắm rắc vào đường ống phòng: ${roomId}`);
 
-    await this.handleSessionConnection(serverSocket);
-
-    return new Response(null, { status: 101, webSocket: clientSocket });
-  }
-
-  async handleSessionConnection(socket) {
-    this.state.acceptWebSocket(socket);
-    this.roomSessions.set(socket, { uid: "", skin: "", x: 0 });
-  }
-
-  async webSocketMessage(socket, messageText) {
+  ws.on('message', async (message) => {
     try {
-      const msg = JSON.parse(messageText);
-      const session = this.roomSessions.get(socket);
-
+      const msg = JSON.parse(message);
+      
       switch (msg.action) {
-        case "join":
-          session.uid = msg.uid;
-          session.skin = msg.skin;
-          session.x = 0; 
+        // 🚀 MẠCH 1: KHAI BÁO DANH TÍNH VÀ JOIN PHÒNG CHƠI CHUNG
+        case 'join': {
+          myUsername = msg.uid;
+          const skinId = msg.skin || 'Avatar_1';
 
-          this.broadcastData({
-            action: "user_joined",
-            uid: session.uid,
-            skin: session.skin,
-            x: session.x
-          }, socket);
+          // Khởi tạo thực thể phòng trên RAM sảnh nếu chưa từng tồn tại
+          if (!rooms[roomId]) {
+            rooms[roomId] = {
+              house_level: 1,
+              farm_coins: 0,
+              inventory: {},
+              players: {},
+              isLoadedFromD1: false,
+              loadingPromise: null
+            };
+          }
 
-          socket.send(JSON.stringify({
-            action: "sync_room_state",
-            house_level: this.houseLevel,
-            inventory: this.sharedInventory,
-            active_players: Array.from(this.roomSessions.values()).filter(p => p.uid !== "")
+          const room = rooms[roomId];
+
+          // Cơ chế kéo dữ liệu gốc từ D1 lên RAM khi phòng vừa được tạo lần đầu
+          if (!room.isLoadedFromD1) {
+            if (!room.loadingPromise) {
+              room.loadingPromise = fetch(`${CF_WORKER_URL}/api/farm-world?room_id=${roomId}`)
+                .then(res => res.json())
+                .then(json => {
+                  if (json.success && json.data) {
+                    room.house_level = parseInt(json.data.house_level) || 1;
+                    room.farm_coins = parseInt(json.data.farm_coins) || 0;
+                    try {
+                      room.inventory = typeof json.data.inventory === 'string' ? JSON.parse(json.data.inventory) : (json.data.inventory || {});
+                    } catch (e) {
+                      room.inventory = {};
+                    }
+                  }
+                  room.isLoadedFromD1 = true;
+                  console.log(`📦 [D1 LOAD OK] Đã hốt trọn dữ liệu phòng ${roomId} lên RAM Render!`);
+                })
+                .catch(err => {
+                  console.error(`🚨 [D1 LOAD ERROR] Lỗi bốc dữ liệu phòng ${roomId}, dùng tạm mặc định:`, err);
+                  room.isLoadedFromD1 = true; // Cho phép chạy tiếp bằng dữ liệu sảnh tạm tránh đứng hình game
+                });
+            }
+            await room.loadingPromise;
+          }
+
+          // Ghim người chơi này vào danh sách nhân sự của Room trong RAM
+          room.players[myUsername] = {
+            ws: ws,
+            uid: myUsername,
+            skin: skinId,
+            x: 0 // Vị trí xuất phát tọa độ sảnh nông trại
+          };
+
+          // Nhịp A: Trả trạng thái toàn cục của phòng về máy đứa vừa vào để Cocos vẽ Map
+          const activePlayersList = Object.values(room.players).map(p => ({
+            uid: p.uid,
+            skin: p.skin,
+            x: p.x
           }));
-          break;
 
-        case "move":
-          session.x = msg.x;
-          this.broadcastData({
-            action: "user_moved",
-            uid: session.uid,
-            x: msg.x,
-            dirX: msg.dirX
-          }, socket);
-          break;
+          ws.send(JSON.stringify({
+            action: 'sync_room_state',
+            house_level: room.house_level,
+            inventory: room.inventory,
+            active_players: activePlayersList
+          }));
 
-        case "add_item":
-          let itemId = msg.item_id;
-          this.sharedInventory[itemId] = (this.sharedInventory[itemId] || 0) + 1;
-
-          await this.saveWorldStateToD1();
-
-          this.broadcastData({
-            action: "inventory_updated",
-            inventory: this.sharedInventory
+          // Nhịp B: Phát loa báo cho 3 đứa còn lại biết để đúc xác Clone nhân vật mới
+          broadcastToRoom(roomId, myUsername, {
+            action: 'user_joined',
+            uid: myUsername,
+            skin: skinId,
+            x: 0
           });
           break;
+        }
+
+        // 🕹️ MẠCH 2: ĐỒNG BỘ CHẠY CHẠY REALTIME (TỐC ĐỘ ÁNH SÁNG)
+        case 'move': {
+          if (!myUsername || !rooms[roomId]) return;
+          const room = rooms[roomId];
+          const player = room.players[myUsername];
+          if (!player) return;
+
+          // Cập nhật bộ nhớ đệm vị trí ngay lập tức trên RAM sảnh Render
+          player.x = msg.x;
+
+          // Bắn loa vị trí cô lập ngay tức khắc cho các thành viên khác thấy real-time mượt mà
+          broadcastToRoom(roomId, myUsername, {
+            action: 'user_moved',
+            uid: myUsername,
+            x: msg.x,
+            dirX: msg.dirX
+          });
+          break;
+        }
+
+        // 📥 MẠCH 3: HỌC SINH NỘP ĐỒ SAU KHI LÀM QUIZ XONG
+        case 'add_item': {
+          if (!myUsername || !rooms[roomId]) return;
+          const room = rooms[roomId];
+          const itemId = msg.item_id;
+
+          if (!itemId) return;
+
+          // Cộng dồn nông sản vào két kho đồ chung trên RAM Render
+          room.inventory[itemId] = (room.inventory[itemId] || 0) + 1;
+
+          // Báo tin vui hòm đồ thay đổi cho TOÀN BỘ thành viên sảnh nông trại múa hoạt ảnh mượt mà
+          broadcastToRoom(roomId, null, {
+            action: 'inventory_updated',
+            inventory: room.inventory
+          });
+
+          // Kích nổ tiến trình lưu ngầm (Write-Behind Async) đẩy ngược tài sản về Cloudflare D1 bền vững
+          saveRoomToD1Background(roomId, room);
+          break;
+        }
+
+        // 🏰 MẠCH 4: BẤM NÚT NÂNG CẤP NHÀ CHUNG
+        case 'upgrade_house': {
+          if (!myUsername || !rooms[roomId]) return;
+          const room = rooms[roomId];
+          const currentLv = room.house_level;
+          const formula = UPGRADE_FORMULAS[currentLv];
+
+          if (!formula) return; // Đạt cấp tối đa, từ chối lệnh lậu
+
+          // Biện pháp bảo vệ nghiêm ngặt: Kiểm tra điều kiện đủ đồ trực tiếp trên RAM Server để chống hack lậu
+          let isSatisfied = true;
+          for (let i = 0; i < formula.items.length; i++) {
+            const reqItem = formula.items[i];
+            const reqAmount = formula.amounts[i];
+            const currentStock = room.inventory[reqItem] || 0;
+            if (currentStock < reqAmount) {
+              isSatisfied = false;
+              break;
+            }
+          }
+
+          if (isSatisfied) {
+            // Khấu trừ nguyên liệu trong két RAM
+            for (let i = 0; i < formula.items.length; i++) {
+              const reqItem = formula.items[i];
+              room.inventory[reqItem] -= formula.amounts[i];
+            }
+            // Lên cấp nhà
+            room.house_level += 1;
+
+            // Phát lệnh ép đồng bộ lại full sảnh cho toàn bộ người chơi để Cocos hoán đổi phôi đồ họa cấp nhà mới
+            const activePlayersList = Object.values(room.players).map(p => ({
+              uid: p.uid,
+              skin: p.skin,
+              x: p.x
+            }));
+
+            broadcastToRoom(roomId, null, {
+              action: 'sync_room_state',
+              house_level: room.house_level,
+              inventory: room.inventory,
+              active_players: activePlayersList
+            });
+
+            // Ghi dữ liệu ngầm lên Cloudflare D1
+            saveRoomToD1Background(roomId, room);
+          }
+          break;
+        }
       }
-    } catch (e) { console.error("❌ Lỗi xử lý WebSocket:", e); }
-  }
-
-  async webSocketClose(socket, code, reason, wasClean) {
-    const session = this.roomSessions.get(socket);
-    if (session && session.uid) {
-      this.broadcastData({ action: "user_left", uid: session.uid });
-    }
-    this.roomSessions.delete(socket);
-  }
-
-  async webSocketError(socket, error) {
-    this.roomSessions.delete(socket);
-  }
-
-  broadcastData(dataObject, excludeSocket = null) {
-    const payload = JSON.stringify(dataObject);
-    for (const socket of this.roomSessions.keys()) {
-      if (socket !== excludeSocket && socket.readyState === 1) { 
-        socket.send(payload);
-      }
-    }
-  }
-
-  async loadWorldStateFromD1() {
-    try {
-      const row = await this.env.D1.prepare("SELECT house_level, shared_inventory FROM farm_worlds WHERE world_id = ?")
-        .bind(this.worldId)
-        .first();
-      if (row) {
-        this.houseLevel = row.house_level;
-        this.sharedInventory = JSON.parse(row.shared_inventory || "{}");
-      }
-    } catch (e) { console.error("🚨 Lỗi load DB D1:", e); }
-  }
-
-  async saveWorldStateToD1() {
-    try {
-      await this.env.D1.prepare("UPDATE farm_worlds SET shared_inventory = ? WHERE world_id = ?")
-        .bind(JSON.stringify(this.sharedInventory), this.worldId)
-        .run();
-    } catch (e) { console.error("🚨 Lỗi ghi DB D1:", e); }
-  }
-}
-
-// ==========================================
-// 🔩 CÁC HÀM PHỤ TRỢ (HELPER CORES)
-// ==========================================
-function jsonResponse(data) {
-  return new Response(JSON.stringify(data), {
-    headers: {
-      "Content-Type": "application/json;charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With"
+    } catch (err) {
+      console.error('🚨 Lỗi xử lý luồng gói tin gói mạng:', err);
     }
   });
+
+  // 🔌 MẠCH 5: NGƯỜI CHƠI ĐÓNG MÁY / ĐỨT MẠNG / THOÁT PHÒNG
+  ws.on('close', () => {
+    if (myUsername && rooms[roomId] && rooms[roomId].players[myUsername]) {
+      // Xóa tên khỏi bộ nhớ đệm RAM sảnh
+      delete rooms[roomId].players[myUsername];
+      console.log(`🔌 [Thoát phòng] Bạn học [${myUsername}] đã ngắt kết nối rời sảnh.`);
+
+      // Báo sảnh xóa xác Clone nhân vật màu vàng rực rỡ tránh rò rỉ RAM Client
+      broadcastToRoom(roomId, null, {
+        action: 'user_left',
+        uid: myUsername
+      });
+
+      // Nếu phòng hoàn toàn trống rỗng không một bóng người, xóa luôn cache phòng giải phóng RAM cho Render
+      if (Object.keys(rooms[roomId].players).length === 0) {
+        delete rooms[roomId];
+        console.log(`🧹 [Giải phóng RAM] Phòng ${roomId} không còn ai chơi, dọn dẹp bộ nhớ sạch bách.`);
+      }
+    }
+  });
+});
+
+// ==========================================
+// 🛠️ CÁC HÀM PHỤ TRỢ ĐIỀU PHỐI ĐƯỜNG TRUYỀN SIÊU TỐC
+// ==========================================
+
+// Hàm phát loa truyền hình gửi tin hàng loạt trong Room
+function broadcastToRoom(roomId, excludeUsername, packetObj) {
+  const room = rooms[roomId];
+  if (!room || !room.players) return;
+
+  const payload = JSON.stringify(packetObj);
+  for (const username in room.players) {
+    if (username === excludeUsername) continue; // Bỏ qua đứa vừa gửi để tối ưu băng thông
+    const client = room.players[username];
+    if (client.ws && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(payload);
+    }
+  }
 }
 
-function errorResponse(msg) {
-  return jsonResponse({ success: false, message: msg });
+// Tiến trình Ghi hoãn Async (Write-Behind) bắn data về Cloudflare D1 mở xích khóa SQLite hoàn toàn ngầm
+function saveRoomToD1Background(roomId, room) {
+  fetch(`${CF_WORKER_URL}/api/farm-world/save`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      room_id: roomId,
+      house_level: room.house_level,
+      farm_coins: room.farm_coins,
+      inventory: room.inventory
+    })
+  })
+  .then(res => res.json())
+  .then(json => {
+    if (json.success) {
+      console.log(`✅ [Write-Behind Thành công] Đã đồng bộ tài sản phòng ${roomId} về D1 an toàn.`);
+    }
+  })
+  .catch(err => console.error(`⚠️ [Write-Behind Thất bại] Lỗi lưu ngầm nông trại về Cloudflare:`, err));
 }
+
+// Bật hạ tầng lò sưởi nguồn sảnh mạng lên mây
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+  console.log(`🚀 Sảnh mạng Realtime Node.js cất cánh hoàn hảo tại cổng: ${PORT}`);
+});
