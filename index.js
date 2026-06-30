@@ -197,29 +197,33 @@ wss.on('connection', (ws, req) => {
         }
 
         // ==========================================================================
-        // 🪓 MẠCH 5 NEW: ĐỒNG BỘ HOẠT ẢNH VUNG DỤNG CỤ LAO ĐỘNG CỦA ĐỒNG ĐỘI REALTIME
+        // 🪓 MẠCH 5: ĐỒNG BỘ HOẠT ẢNH VUNG DỤNG CỤ LAO ĐỘNG CỦA ĐỒNG ĐỘI REALTIME
         // ==========================================================================
         case 'sync_user_tool': {
           if (!myUsername || !rooms[roomId]) return;
-          
-          // Ghi đè găm danh tính đứa gửi hành động để sảnh Client khác bóc tách
           msg.uid = myUsername;
-          
-          // Phát loa truyền tiếp cho toàn bộ những đứa còn lại trong phòng chơi (Loại trừ chính nó)
           broadcastToRoom(roomId, myUsername, msg);
           break;
         }
 
         // ==========================================================================
-        // 🎁 MẠCH 6 NEW: ĐỒNG BỘ HIỆU ỨNG QUÀ BAY DIỆN RỘNG (COOP CELEBRATION)
+        // 🎁 MẠCH 6: ĐỒNG BỘ HIỆU ỨNG QUÀ BAY DIỆN RỘNG (COOP CELEBRATION)
         // ==========================================================================
         case 'sync_user_vfx': {
           if (!myUsername || !rooms[roomId]) return;
-          
-          // Ghim danh tính tài khoản học sinh vừa hoàn thành kết toán Quiz rớt vật phẩm
           msg.uid = myUsername;
-          
-          // Phát loa dội ngược về máy của tất cả bạn học online còn lại trong phòng (Loại trừ chính nó)
+          broadcastToRoom(roomId, myUsername, msg);
+          break;
+        }
+
+        // ==========================================================================
+        // 🗣️ MẠCH 7 ĐÓN ĐẦU: TRUYỀN TIẾP TRẠNG THÁI MIC NÓI CHUYỆN (VOICE REALTIME BROADCAST)
+        // Khi máy local đè/nhả phím nói, gói tin truyền qua đây sẽ tự động dội ngược xuống
+        // clone của toàn phòng mà không kích hoạt ghi file hay chạm ổ cứng D1.
+        // ==========================================================================
+        case 'sync_voice_status': {
+          if (!myUsername || !rooms[roomId]) return;
+          msg.uid = myUsername;
           broadcastToRoom(roomId, myUsername, msg);
           break;
         }
