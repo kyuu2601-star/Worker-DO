@@ -62,7 +62,7 @@ wss.on('connection', (ws, req) => {
               farm_coins: 0,
               inventory: {},
               players: {},
-              room_members: [], 
+              room_members: [], // THÊM BIẾN ĐỆM TRÊN RAM: Lưu danh sách 4 đứa từ D1
               isLoadedFromD1: false,
               loadingPromise: null
             };
@@ -79,7 +79,12 @@ wss.on('connection', (ws, req) => {
                   if (json.success && json.data) {
                     room.house_level = parseInt(json.data.house_level) || 1;
                     room.farm_coins = parseInt(json.data.farm_coins) || 0;
+                    
+                    // ==========================================================================
+                    // 🔥 THÔNG MẠCH TRUNG CHUYỂN: Hốt danh sách thành viên D1 từ Worker về RAM Render
+                    // ==========================================================================
                     room.room_members = json.data.room_members || [];
+                    // ==========================================================================
 
                     try {
                       room.inventory = typeof json.data.inventory === 'string' ? JSON.parse(json.data.inventory) : (json.data.inventory || {});
@@ -115,7 +120,7 @@ wss.on('connection', (ws, req) => {
             skin: skinId,
             x: 0,
             farm_energy: liveFarmEnergy,
-            coins: liveUserCoins // 👈 GĂM TIỀN XU CÁ NHÂN LÊN BỆ PHÓNG RAM RENDER
+            coins: liveUserCoins // 👈 GĂM TIỀN XU THƯỜNG CÁ NHÂN LÊN BỆ PHÓNG RAM RENDER
           };
 
           // Nhịp A: Trả trạng thái toàn cục của phòng về máy đứa vừa vào để Cocos vẽ Map
@@ -125,7 +130,7 @@ wss.on('connection', (ws, req) => {
             x: p.x
           }));
 
-          // 📡 VÁ MẠCH PHÁT LOA: Chuyển tiếp đồng thời mảng thành viên, Thể lực, và cả Xu cá nhân
+          // 📡 VÁ MẠCH PHÁT LOA: Chuyển tiếp đồng thời mảng thành viên, Thể lực, và cả Xu thường cá nhân
           ws.send(JSON.stringify({
             action: 'sync_room_state',
             house_level: room.house_level,
@@ -221,7 +226,7 @@ wss.on('connection', (ws, req) => {
             }
             room.house_level += 1;
 
-            // 👑 THƯỞNG KINH TẾ CÁ NHÂN: Đọc từ CSV thấy thưởng 50 thường, 10 nâng cấp (Tùy biến cứng ở đây làm mẫu 50 xu thường)
+            // 👑 THƯỞNG XU THƯỜNG (COINS) CỦA HỌC SINH KHI NÂNG CẤP NHÀ THÀNH CÔNG
             const REWARD_COINS_CUC_BO = 50; 
             if (room.players[myUsername]) {
               room.players[myUsername].coins += REWARD_COINS_CUC_BO;
@@ -244,7 +249,7 @@ wss.on('connection', (ws, req) => {
               coins: room.players[myUsername] ? room.players[myUsername].coins : undefined // 👈 ĐỒNG BỘ ÉP ĐÈ COINS HUD
             });
 
-            // Ghi dữ liệu ngầm về D1, truyền lệnh báo tên đứa được cộng xu thưởng
+            // Ghi dữ liệu ngầm về D1, truyền lệnh báo tên đứa được cộng xu thường
             saveRoomToD1Background(roomId, room, myUsername, REWARD_COINS_CUC_BO);
           }
           break;
@@ -292,8 +297,8 @@ function broadcastToRoom(roomId, excludeUsername, packetObj) {
   }
 }
 
-// 👑 MỞ RỘNG HÀM LƯU NGẦM: Chấp nhận tham số báo danh tính và tiền thưởng xu của đứa nâng cấp nhà chung
-function saveRoomToD1Background(roomId, room, upgradeUser = null, bonusCoins = 0) {
+// 🛠️ Chuẩn hóa tham số: Nhận vào username đứa nâng cấp và số xu thường (coins) được thưởng
+function saveRoomToD1Background(roomId, room, upgradeUser = null, coinsEarned = 0) {
   fetch(`${CF_WORKER_URL}/api/farm-world/save`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -302,8 +307,8 @@ function saveRoomToD1Background(roomId, room, upgradeUser = null, bonusCoins = 0
       house_level: room.house_level,
       farm_coins: room.farm_coins,
       inventory: room.inventory,
-      upgrade_user: upgradeUser,   // 🆕 Gửi kèm username đứa kích hoạt
-      bonus_coins: bonusCoins      // 🆕 Số xu thường được thưởng
+      upgrade_user: upgradeUser,   
+      coins: coinsEarned           // 👈 CHUẨN HÓA BIẾN COINS THƯỜNG THEO ĐÚNG Ý ĐẠI CA
     })
   })
   .then(res => res.json())
