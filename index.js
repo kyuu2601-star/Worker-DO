@@ -14,12 +14,12 @@ const UPGRADE_FORMULAS = {
   3: { items: ["mine_gold", "meat_beef", "fast_pizza"], amounts: [5, 10, 5] }
 };
 
-// Đọc địa chỉ link mây Worker từ biến môi trường Render đã setup ở turn trước
+// Đọc địa chỉ link mây Worker từ biến môi trường Render đã setup
 const CF_WORKER_URL = process.env.CF_WORKER_URL || "https://sync-sheet-worker.kyuu2601.workers.dev";
 
 // ==========================================
 // 🛡️ HẠ TẦNG HTTP SERVER BẢO HIỂM CHO RENDER.COM
-// Render Free yêu cầu phải phản hồi cổng HTTP để nghiệm thu (Health Check), nếu không sẽ báo lỗi Deploy Timeout!
+// Render Free yêu cầu phải phản hồi cổng HTTP để nghiệm thu (Health Check)
 // ==========================================
 const server = createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
@@ -62,6 +62,7 @@ wss.on('connection', (ws, req) => {
               farm_coins: 0,
               inventory: {},
               players: {},
+              room_members: [], // 🆕 THÊM BIẾN ĐỆM TRÊN RAM: Lưu danh sách 4 đứa từ D1
               isLoadedFromD1: false,
               loadingPromise: null
             };
@@ -78,12 +79,19 @@ wss.on('connection', (ws, req) => {
                   if (json.success && json.data) {
                     room.house_level = parseInt(json.data.house_level) || 1;
                     room.farm_coins = parseInt(json.data.farm_coins) || 0;
+                    
+                    // ==========================================================================
+                    // 🔥 THÔNG MẠCH TRUNG CHUYỂN: Hốt danh sách thành viên D1 từ Worker về RAM Render
+                    // ==========================================================================
+                    room.room_members = json.data.room_members || [];
+                    // ==========================================================================
+
                     try {
                       room.inventory = typeof json.data.inventory === 'string' ? JSON.parse(json.data.inventory) : (json.data.inventory || {});
                     } catch (e) {
                       room.inventory = {};
                     }
-                    console.log(`📦 [D1 LOAD OK] Đã hốt trọn dữ liệu phòng ${roomId} lên RAM Render!`);
+                    console.log(`📦 [D1 LOAD OK] Đã hốt trọn dữ liệu phòng ${roomId} kèm ${room.room_members.length} thành viên lên RAM Render!`);
                   } else {
                     console.warn(`⚠️ [D1 LOAD FAIL] Worker từ chối cấp dữ liệu gốc phòng ${roomId}:`, json.message || "Không rõ lý do");
                   }
@@ -91,18 +99,18 @@ wss.on('connection', (ws, req) => {
                 })
                 .catch(err => {
                   console.error(`🚨 [D1 LOAD ERROR] Lỗi bốc dữ liệu phòng ${roomId}, dùng tạm mặc định:`, err);
-                  room.isLoadedFromD1 = true; // Cho phép chạy tiếp bằng dữ liệu sảnh tạm tránh đứng hình game
+                  room.isLoadedFromD1 = true; 
                 });
             }
             await room.loadingPromise;
           }
 
-          // Ghim người chơi này vào danh sách nhân sự của Room trong RAM
+          // Ghim người chơi này vào danh sách nhân sự ONLINE của Room trong RAM
           room.players[myUsername] = {
             ws: ws,
             uid: myUsername,
             skin: skinId,
-            x: 0 // Vị trí xuất phát tọa độ sảnh nông trại
+            x: 0 
           };
 
           // Nhịp A: Trả trạng thái toàn cục của phòng về máy đứa vừa vào để Cocos vẽ Map
@@ -112,14 +120,21 @@ wss.on('connection', (ws, req) => {
             x: p.x
           }));
 
+          // ==========================================================================
+          // 📡 VÁ MẠCH PHÁT LOA CHÍ MẠCH: Đút mảng room_members tĩnh từ RAM phát xuống Cocos
+          // Xóa sổ triệt để lỗi báo NULL/UNDEFINED ngoài giao diện!
+          // ==========================================================================
           ws.send(JSON.stringify({
             action: 'sync_room_state',
             house_level: room.house_level,
             inventory: room.inventory,
-            active_players: activePlayersList
+            farm_coins: room.farm_coins,
+            active_players: activePlayersList,
+            room_members: room.room_members // 👈 CHUYỂN TIẾP MẢNG THÀNH VIÊN D1 XUỐNG FRONTEND
           }));
+          // ==========================================================================
 
-          // Nhịp B: Phát loa báo cho 3 đứa còn lại biết để đúc xác Clone nhân vật mới
+          // Nhịp B: Phát loa báo cho các đứa còn lại biết để đúc xác Clone nhân vật mới
           broadcastToRoom(roomId, myUsername, {
             action: 'user_joined',
             uid: myUsername,
@@ -129,17 +144,15 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // 🕹️ MẠCH 2: ĐỒNG BỘ CHẠY CHẠY REALTIME (TỐC ĐỘ ÁNH SÁNG)
+        // 🕹️ MẠCH 2: ĐỒNG BỘ CHẠY CHẠY REALTIME
         case 'move': {
           if (!myUsername || !rooms[roomId]) return;
           const room = rooms[roomId];
           const player = room.players[myUsername];
           if (!player) return;
 
-          // Cập nhật bộ nhớ đệm vị trí ngay lập tức trên RAM sảnh Render
           player.x = msg.x;
 
-          // Bắn loa vị trí cô lập ngay tức khắc cho các thành viên khác thấy real-time mượt mà
           broadcastToRoom(roomId, myUsername, {
             action: 'user_moved',
             uid: myUsername,
@@ -157,16 +170,13 @@ wss.on('connection', (ws, req) => {
 
           if (!itemId) return;
 
-          // Cộng dồn nông sản vào két kho đồ chung trên RAM Render
           room.inventory[itemId] = (room.inventory[itemId] || 0) + 1;
 
-          // Báo tin vui hòm đồ thay đổi cho TOÀN BỘ thành viên sảnh nông trại múa hoạt ảnh mượt mà
           broadcastToRoom(roomId, null, {
             action: 'inventory_updated',
             inventory: room.inventory
           });
 
-          // Kích nổ tiến trình lưu ngầm (Write-Behind Async) đẩy ngược tài sản về Cloudflare D1 bền vững
           saveRoomToD1Background(roomId, room);
           break;
         }
@@ -178,9 +188,8 @@ wss.on('connection', (ws, req) => {
           const currentLv = room.house_level;
           const formula = UPGRADE_FORMULAS[currentLv];
 
-          if (!formula) return; // Đạt cấp tối đa, từ chối lệnh lậu
+          if (!formula) return; 
 
-          // Biện pháp bảo vệ nghiêm ngặt: Kiểm tra điều kiện đủ đồ trực tiếp trên RAM Server để chống hack lậu
           let isSatisfied = true;
           for (let i = 0; i < formula.items.length; i++) {
             const reqItem = formula.items[i];
@@ -193,29 +202,28 @@ wss.on('connection', (ws, req) => {
           }
 
           if (isSatisfied) {
-            // Khấu trừ nguyên liệu trong két RAM
             for (let i = 0; i < formula.items.length; i++) {
               const reqItem = formula.items[i];
               room.inventory[reqItem] -= formula.amounts[i];
             }
-            // Lên cấp nhà
             room.house_level += 1;
 
-            // Phát lệnh ép đồng bộ lại full sảnh cho toàn bộ người chơi để Cocos hoán đổi phôi đồ họa cấp nhà mới
             const activePlayersList = Object.values(room.players).map(p => ({
               uid: p.uid,
               skin: p.skin,
               x: p.x
             }));
 
+            // Đưa mảng room_members vào cả luồng phát loa nâng cấp để Popup tự làm tươi chuẩn chỉ
             broadcastToRoom(roomId, null, {
               action: 'sync_room_state',
               house_level: room.house_level,
               inventory: room.inventory,
-              active_players: activePlayersList
+              farm_coins: room.farm_coins,
+              active_players: activePlayersList,
+              room_members: room.room_members // 👈 PHÁT KÈM KHI UPGRADE THÀNH CÔNG
             });
 
-            // Ghi dữ liệu ngầm lên Cloudflare D1
             saveRoomToD1Background(roomId, room);
           }
           break;
@@ -229,17 +237,14 @@ wss.on('connection', (ws, req) => {
   // 🔌 MẠCH 5: NGƯỜI CHƠI ĐÓNG MÁY / ĐỨT MẠNG / THOÁT PHÒNG
   ws.on('close', () => {
     if (myUsername && rooms[roomId] && rooms[roomId].players[myUsername]) {
-      // Xóa tên khỏi bộ nhớ đệm RAM sảnh
       delete rooms[roomId].players[myUsername];
       console.log(`🔌 [Thoát phòng] Bạn học [${myUsername}] đã ngắt kết nối rời sảnh.`);
 
-      // Báo sảnh xóa xác Clone nhân vật màu vàng rực rỡ tránh rò rỉ RAM Client
       broadcastToRoom(roomId, null, {
         action: 'user_left',
         uid: myUsername
       });
 
-      // Nếu phòng hoàn toàn trống rỗng không một bóng người, xóa luôn cache phòng giải phóng RAM cho Render
       if (Object.keys(rooms[roomId].players).length === 0) {
         delete rooms[roomId];
         console.log(`🧹 [Giải phóng RAM] Phòng ${roomId} không còn ai chơi, dọn dẹp bộ nhớ sạch bách.`);
@@ -252,14 +257,13 @@ wss.on('connection', (ws, req) => {
 // 🛠️ CÁC HÀM PHỤ TRỢ ĐIỀU PHỐI ĐƯỜNG TRUYỀN SIÊU TỐC
 // ==========================================
 
-// Hàm phát loa truyền hình gửi tin hàng loạt trong Room
 function broadcastToRoom(roomId, excludeUsername, packetObj) {
   const room = rooms[roomId];
   if (!room || !room.players) return;
 
   const payload = JSON.stringify(packetObj);
   for (const username in room.players) {
-    if (username === excludeUsername) continue; // Bỏ qua đứa vừa gửi để tối ưu băng thông
+    if (username === excludeUsername) continue; 
     const client = room.players[username];
     if (client.ws && client.ws.readyState === WebSocket.OPEN) {
       client.ws.send(payload);
@@ -267,7 +271,6 @@ function broadcastToRoom(roomId, excludeUsername, packetObj) {
   }
 }
 
-// Tiến trình Ghi hoãn Async (Write-Behind) bắn data về Cloudflare D1 mở xích khóa SQLite hoàn toàn ngầm
 function saveRoomToD1Background(roomId, room) {
   fetch(`${CF_WORKER_URL}/api/farm-world/save`, {
     method: 'POST',
@@ -290,7 +293,6 @@ function saveRoomToD1Background(roomId, room) {
   .catch(err => console.error(`🚨 [Write-Behind SẬP MẠCH] Lỗi kết nối HTTP truyền tải về Cloudflare:`, err));
 }
 
-// Bật hạ tầng lò sưởi nguồn sảnh mạng lên mây
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log(`🚀 Sảnh mạng Realtime Node.js cất cánh hoàn hảo tại cổng: ${PORT}`);
