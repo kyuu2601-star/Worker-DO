@@ -120,10 +120,7 @@ wss.on('connection', (ws, req) => {
             x: p.x
           }));
 
-          // ==========================================================================
           // 📡 VÁ MẠCH PHÁT LOA CHÍ MẠCH: Đút mảng room_members tĩnh từ RAM phát xuống Cocos
-          // Xóa sổ triệt để lỗi báo NULL/UNDEFINED ngoài giao diện!
-          // ==========================================================================
           ws.send(JSON.stringify({
             action: 'sync_room_state',
             house_level: room.house_level,
@@ -132,7 +129,6 @@ wss.on('connection', (ws, req) => {
             active_players: activePlayersList,
             room_members: room.room_members // 👈 CHUYỂN TIẾP MẢNG THÀNH VIÊN D1 XUỐNG FRONTEND
           }));
-          // ==========================================================================
 
           // Nhịp B: Phát loa báo cho các đứa còn lại biết để đúc xác Clone nhân vật mới
           broadcastToRoom(roomId, myUsername, {
@@ -162,7 +158,10 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // 📥 MẠCH 3: HỌC SINH NỘP ĐỒ SAU KHI LÀM QUIZ XONG
+        // ==========================================================================
+        // 📥 MẠCH 3: HỌC SINH NỘP ĐỒ VÀ HẠCH TOÁN NHÂN 10 TIỀN VÀO KÉT CHUNG PHÒNG CHƠI
+        // Tiếp nhận tham số score của Client bắn lên thực hiện phép tính kinh tế MMO
+        // ==========================================================================
         case 'add_item': {
           if (!myUsername || !rooms[roomId]) return;
           const room = rooms[roomId];
@@ -170,13 +169,24 @@ wss.on('connection', (ws, req) => {
 
           if (!itemId) return;
 
+          // 1. Tích lũy nông sản vào kho đồ chung trong RAM
           room.inventory[itemId] = (room.inventory[itemId] || 0) + 1;
 
+          // 2. 🪙 LÕI KINH TẾ MỚI: Bốc điểm số từ gói tin, tự động nhân 10 đắp vào quỹ chung của phòng
+          const quizScore = parseInt(msg.score) || 0;
+          const bonusCoins = quizScore * 10;
+          room.farm_coins += bonusCoins;
+
+          console.log(`🪙 [Hạch toán] Học sinh [${myUsername}] làm đúng ${quizScore} câu -> Tặng quỹ phòng +${bonusCoins} Xu Farm. Số dư két hiện tại: ${room.farm_coins}`);
+
+          // 3. Bắn loa thông báo cập nhật kho hàng và số dư tiền mới về HUD tất cả đứa đang online
           broadcastToRoom(roomId, null, {
             action: 'inventory_updated',
-            inventory: room.inventory
+            inventory: room.inventory,
+            farm_coins: room.farm_coins // Phát kèm số dư xu Farm mới để Client nhảy số HUD đồng loạt
           });
 
+          // 4. Kích nổ tiến trình lưu ngầm đồng bộ về D1 đám mây
           saveRoomToD1Background(roomId, room);
           break;
         }
@@ -221,7 +231,7 @@ wss.on('connection', (ws, req) => {
               inventory: room.inventory,
               farm_coins: room.farm_coins,
               active_players: activePlayersList,
-              room_members: room.room_members // 👈 PHÁT KÈM KHI UPGRADE THÀNH CÔNG
+              room_members: room.room_members 
             });
 
             saveRoomToD1Background(roomId, room);
