@@ -1,5 +1,6 @@
 const { createServer } = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
+const { AccessToken } = require('livekit-server-sdk'); // 👈 THÊM MỚI: SDK tạo token LiveKit
 
 // ==========================================
 // 🧠 KHO LƯU TRỮ TRẠNG THÁI TRÊN RAM (IN-MEMORY STATE)
@@ -18,10 +19,63 @@ const UPGRADE_FORMULAS = {
 const CF_WORKER_URL = process.env.CF_WORKER_URL || "https://sync-sheet-worker.kyuu2601.workers.dev";
 
 // ==========================================
+// 🎙️ THÔNG SỐ LIVEKIT VOICE — LẤY TỪ BIẾN MÔI TRƯỜNG RENDER (Settings -> Environment)
+// ==========================================
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
+const LIVEKIT_URL = process.env.LIVEKIT_URL || "wss://mon-english-y39l53ic.livekit.cloud";
+
+// ==========================================
 // 🛡️ HẠ TẦNG HTTP SERVER BẢO HIỂM CHO RENDER.COM
 // Render Free yêu cầu phải phản hồi cổng HTTP để nghiệm thu (Health Check)
 // ==========================================
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
+  const reqUrl = new URL(req.url, `http://${req.headers.host}`);
+
+  // 🎙️ ROUTE MỚI: PHÁT TOKEN VOICE CHAT LIVEKIT
+  // Gọi dạng: GET /voice-token?room=global_room_01&username=Kyuu
+  if (reqUrl.pathname === '/voice-token') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    const room = reqUrl.searchParams.get('room');
+    const username = reqUrl.searchParams.get('username');
+
+    if (!room || !username) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Thiếu room hoặc username' }));
+      return;
+    }
+
+    if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Server chưa cấu hình LIVEKIT_API_KEY / LIVEKIT_API_SECRET' }));
+      return;
+    }
+
+    try {
+      const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+        identity: username,
+        ttl: '4h',
+      });
+      at.addGrant({
+        roomJoin: true,
+        room: room,
+        canPublish: true,
+        canSubscribe: true,
+      });
+
+      const token = await at.toJwt();
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ token, url: LIVEKIT_URL }));
+    } catch (err) {
+      console.error('🚨 [Voice Token] Lỗi tạo token:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Tạo token thất bại' }));
+    }
+    return;
+  }
+
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
     res.end('Sảnh mạng Mon English Realtime đang thông suốt rực rỡ!');
