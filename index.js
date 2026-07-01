@@ -30,6 +30,16 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL || "wss://mon-english-y39l53ic.livek
 // Render Free yêu cầu phải phản hồi cổng HTTP để nghiệm thu (Health Check)
 // ==========================================
 const server = createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   const reqUrl = new URL(req.url, `http://${req.headers.host}`);
 
   // 🎙️ ROUTE MỚI: PHÁT TOKEN VOICE CHAT LIVEKIT
@@ -191,7 +201,7 @@ wss.on('connection', (ws, req) => {
             inventory: room.inventory,
             farm_coins: room.farm_coins,
             active_players: activePlayersList,
-            room_members: room.room_members,
+  0,        room_members: room.room_members,
             farm_energy: room.players[myUsername].farm_energy,
             coins: room.players[myUsername].coins // 👈 PHÓNG ĐẦY ĐỦ XU THƯỜNG XUỐNG COCOS NẠP HUD CÁ NHÂN
           }));
@@ -200,7 +210,7 @@ wss.on('connection', (ws, req) => {
           broadcastToRoom(roomId, myUsername, {
             action: 'user_joined',
             uid: myUsername,
-            skin: skinId,
+      0,    skin: skinId,
             x: 0
           });
           break;
