@@ -3,7 +3,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const { AccessToken } = require('livekit-server-sdk'); // 👈 THÊM MỚI: SDK tạo token LiveKit
 
 // ==========================================
-// 🧠 KHO LƯU TRỮ TRẠNG THÁI TRÊN RAM (IN-MEMORY STATE)
+// KHO LƯU TRỮ TRẠNG THÁI TRÊN RAM (IN-MEMORY STATE)
 // Đảm bảo truy xuất tốc độ vài mili-giây, triệt tiêu delay Disk I/O
 // ==========================================
 const rooms = {};
