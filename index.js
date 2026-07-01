@@ -3,7 +3,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const { AccessToken } = require('livekit-server-sdk'); // 👈 THÊM MỚI: SDK tạo token LiveKit
 
 // ==========================================
-// KHO LƯU TRỮ TRẠNG THÁI TRÊN RAM (IN-MEMORY STATE)
+// 🧠 KHO LƯU TRỮ TRẠNG THÁI TRÊN RAM (IN-MEMORY STATE)
 // Đảm bảo truy xuất tốc độ vài mili-giây, triệt tiêu delay Disk I/O
 // ==========================================
 const rooms = {};
@@ -45,8 +45,6 @@ const server = createServer(async (req, res) => {
   // 🎙️ ROUTE MỚI: PHÁT TOKEN VOICE CHAT LIVEKIT
   // Gọi dạng: GET /voice-token?room=global_room_01&username=Kyuu
   if (reqUrl.pathname === '/voice-token') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-
     const room = reqUrl.searchParams.get('room');
     const username = reqUrl.searchParams.get('username');
 
@@ -201,7 +199,7 @@ wss.on('connection', (ws, req) => {
             inventory: room.inventory,
             farm_coins: room.farm_coins,
             active_players: activePlayersList,
-  0,        room_members: room.room_members,
+            room_members: room.room_members,
             farm_energy: room.players[myUsername].farm_energy,
             coins: room.players[myUsername].coins // 👈 PHÓNG ĐẦY ĐỦ XU THƯỜNG XUỐNG COCOS NẠP HUD CÁ NHÂN
           }));
@@ -210,7 +208,7 @@ wss.on('connection', (ws, req) => {
           broadcastToRoom(roomId, myUsername, {
             action: 'user_joined',
             uid: myUsername,
-      0,    skin: skinId,
+            skin: skinId,
             x: 0
           });
           break;
@@ -420,7 +418,7 @@ function saveRoomToD1Background(roomId, room, upgradeUser = null, coinsEarned = 
       inventory: room.inventory,
       upgrade_user: upgradeUser,   
       is_guild_reward: isGuildReward, // 👈 CẮM PHÍCH CHỈ THỊ: Báo Worker kích hoạt mạch SQL UPDATE diện rộng
-      reward_coins: coinsEarned       // 👈 Số tiền chuẩn chỉ bốc từ cấu hình để Worker nạp vào D1
+      reward_coins: coinsEarned       // 👈 Số tiền chuẩn chỉ bốc từ cấu hình để Worker nạp thẳng vào D1
     })
   })
   .then(res => res.json())
