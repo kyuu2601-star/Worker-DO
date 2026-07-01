@@ -420,7 +420,7 @@ function saveRoomToD1Background(roomId, room, upgradeUser = null, coinsEarned = 
       inventory: room.inventory,
       upgrade_user: upgradeUser,   
       is_guild_reward: isGuildReward, // 👈 CẮM PHÍCH CHỈ THỊ: Báo Worker kích hoạt mạch SQL UPDATE diện rộng
-      reward_coins: coinsEarned       // 👈 Số tiền chuẩn chỉ bốc từ cấu hình để Worker nạp thẳng vào D1
+      reward_coins: coinsEarned       // 👈 Số tiền chuẩn chỉ bốc từ cấu hình để Worker nạp vào D1
     })
   })
   .then(res => res.json())
