@@ -1,25 +1,94 @@
 const { createServer } = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
-const { AccessToken } = require('livekit-server-sdk'); // 👈 THÊM MỚI: SDK tạo token LiveKit
+const { AccessToken } = require('livekit-server-sdk'); // 👈 SDK tạo token LiveKit
 
 // ==========================================
 // 🧠 KHO LƯU TRỮ TRẠNG THÁI TRÊN RAM (IN-MEMORY STATE)
-// Đảm bảo truy xuất tốc độ vài mili-giây, triệt tiêu delay Disk I/O
 // ==========================================
 const rooms = {};
 
-// Cấu hình công thức nâng cấp nhà chung đồng bộ 100% với Frontend Cocos và Bảng Google Sheets
-const UPGRADE_FORMULAS = {
-  1: { items: ["wood_log", "mine_stone"], amounts: [4, 4], reward_coins: 50 },
-  2: { items: ["wood_log", "mine_iron", "crop_potato"], amounts: [10, 5, 8], reward_coins: 120 },
-  3: { items: ["mine_gold", "meat_beef", "fast_pizza"], amounts: [5, 10, 5], reward_coins: 200 }
-};
+// ==========================================================================
+// 🏰 [ĐÃ VÁ] CÔNG THỨC NÂNG CẤP NHÀ: KHÔNG CÒN HARDCODE CỨNG NỮA
+// Server giờ tự fetch + parse CÙNG 1 FILE CSV mà Client đang dùng, để 2 bên
+// luôn khớp tuyệt đối, và tự động hỗ trợ MỌI cấp có trong Sheet (không giới hạn).
+// ==========================================================================
+const UPGRADE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT-EFZn4iPTyVHW35NtYDWCwVH5mt6Vuw9kbAFNMm8CkLXzu31QdoK7vW18NdlKLXKKgZIH9YYFKqoh/pub?gid=1657520732&single=true&output=csv";
+
+let UPGRADE_FORMULAS_DYNAMIC = {};
+let _formulasReady = false;
+
+/**
+ * Cấu trúc cột thật của Sheet (đã xác nhận qua ảnh chụp):
+ * A=Level, B-E=Item1-4 ("item_xxx:soLuong"), F=Xu farm (yêu cầu),
+ * G=Xu (thưởng xu thường cá nhân), H=Xu Upgrade (thưởng xu nâng cấp cá nhân),
+ * I=Phần thưởng extra (item bonus, có thể trống)
+ */
+function parseUpgradeFormulaCSV(csvText) {
+  const parsed = {};
+  const lines = csvText.split(/\r?\n/).filter(l => l.trim() !== "");
+
+  for (let i = 1; i < lines.length; i++) {
+    const matches = lines[i].match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || [];
+    const values = matches.map(v => v.trim().replace(/^"|"$/g, ""));
+    if (values.length < 1) continue;
+
+    const lvKey = values[0];
+    const items = [];
+    const amounts = [];
+
+    // 🎯 CHỈ 4 CỘT ITEM THẬT SỰ (index 1 -> 4), KHÔNG PHẢI 5 NHƯ CODE CŨ
+    for (let col = 1; col <= 4; col++) {
+      const raw = values[col];
+      if (raw && raw.includes(":")) {
+        const tokens = raw.split(":");
+        const itemName = tokens[0].trim().replace(/^item_/, "");
+        const amt = parseInt(tokens[1]) || 0;
+        if (amt > 0) {
+          items.push(itemName);
+          amounts.push(amt);
+        }
+      }
+    }
+
+    const reqFarmCoin = parseInt(values[5]) || 0;        // Cột F - Xu farm
+    const rewardCoin = parseInt(values[6]) || 0;          // Cột G - Xu (thưởng cá nhân)
+    const rewardUpgradeCoin = parseInt(values[7]) || 0;    // Cột H - Xu Upgrade
+    const rewardExtraItem = values[8] ? values[8].trim() : ""; // Cột I - Phần thưởng extra
+
+    parsed[lvKey] = { items, amounts, reqFarmCoin, rewardCoin, rewardUpgradeCoin, rewardExtraItem };
+  }
+
+  return parsed;
+}
+
+async function refreshUpgradeFormulas() {
+  try {
+    const res = await fetch(UPGRADE_CSV_URL);
+    const csvText = await res.text();
+    const parsed = parseUpgradeFormulaCSV(csvText);
+
+    if (Object.keys(parsed).length > 0) {
+      UPGRADE_FORMULAS_DYNAMIC = parsed;
+      _formulasReady = true;
+      console.log(`✅ [Upgrade Formula] Đã nạp/refresh ${Object.keys(parsed).length} cấp công thức nâng cấp từ Sheet.`);
+    } else {
+      console.warn("⚠️ [Upgrade Formula] Sheet trả về rỗng, giữ nguyên bản cache cũ.");
+    }
+  } catch (err) {
+    console.error("🚨 [Upgrade Formula] Lỗi tải công thức nâng cấp từ Sheet:", err);
+  }
+}
+
+// Nạp ngay khi server khởi động, và tự refresh mỗi 5 phút để không cần restart khi fen sửa Sheet
+refreshUpgradeFormulas();
+setInterval(refreshUpgradeFormulas, 5 * 60 * 1000);
+// ==========================================================================
 
 // Đọc địa chỉ link mây Worker từ biến môi trường Render đã setup
 const CF_WORKER_URL = process.env.CF_WORKER_URL || "https://sync-sheet-worker.kyuu2601.workers.dev";
 
 // ==========================================
-// 🎙️ THÔNG SỐ LIVEKIT VOICE — LẤY TỪ BIẾN MÔI TRƯỜNG RENDER (Settings -> Environment)
+// 🎙️ THÔNG SỐ LIVEKIT VOICE
 // ==========================================
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
@@ -27,7 +96,6 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL || "wss://mon-english-y39l53ic.livek
 
 // ==========================================
 // 🛡️ HẠ TẦNG HTTP SERVER BẢO HIỂM CHO RENDER.COM
-// Render Free yêu cầu phải phản hồi cổng HTTP để nghiệm thu (Health Check)
 // ==========================================
 const server = createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -42,8 +110,6 @@ const server = createServer(async (req, res) => {
 
   const reqUrl = new URL(req.url, `http://${req.headers.host}`);
 
-  // 🎙️ ROUTE MỚI: PHÁT TOKEN VOICE CHAT LIVEKIT
-  // Gọi dạng: GET /voice-token?room=global_room_01&username=Kyuu
   if (reqUrl.pathname === '/voice-token') {
     const room = reqUrl.searchParams.get('room');
     const username = reqUrl.searchParams.get('username');
@@ -84,6 +150,13 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // 🆕 Route debug nhanh xem cấu hình công thức nâng cấp đã nạp đúng chưa
+  if (reqUrl.pathname === '/debug/upgrade-formulas') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ready: _formulasReady, formulas: UPGRADE_FORMULAS_DYNAMIC }, null, 2));
+    return;
+  }
+
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
     res.end('Sảnh mạng Mon English Realtime đang thông suốt rực rỡ!');
@@ -99,10 +172,9 @@ const wss = new WebSocketServer({ server });
 // 📡 ĐƯỜNG ỐNG TIẾP NHẬN MẠCH KẾT NỐI WEBSOCKET
 // ==========================================
 wss.on('connection', (ws, req) => {
-  // Trích xuất worldId (roomId) từ URL đường dẫn của Cocos bắn lên (Ví dụ: /farm-ws/global_room_01)
   const urlParts = req.url.split('/');
   const roomId = urlParts[urlParts.length - 1] || 'global_room_01';
-  
+
   let myUsername = null;
 
   console.log(`🌐 [Kết nối mới] Một thiết bị vừa cắm rắc vào đường ống phòng: ${roomId}`);
@@ -110,21 +182,19 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (message) => {
     try {
       const msg = JSON.parse(message);
-      
+
       switch (msg.action) {
-        // 🚀 MẠCH 1: KHAI BÁO DANH TÍNH VÀ JOIN PHÒNG CHƠI CHUNG
         case 'join': {
           myUsername = msg.uid;
           const skinId = msg.skin || 'Avatar_1';
 
-          // Khởi tạo thực thể phòng trên RAM sảnh nếu chưa từng tồn tại
           if (!rooms[roomId]) {
             rooms[roomId] = {
               house_level: 1,
               farm_coins: 0,
               inventory: {},
               players: {},
-              room_members: [], // THÊM BIẾN ĐỆM TRÊN RAM: Lưu danh sách 4 đứa từ D1
+              room_members: [],
               isLoadedFromD1: false,
               loadingPromise: null
             };
@@ -132,7 +202,6 @@ wss.on('connection', (ws, req) => {
 
           const room = rooms[roomId];
 
-          // Cơ chế kéo dữ liệu gốc từ D1 lên RAM khi phòng vừa được tạo lần đầu
           if (!room.isLoadedFromD1) {
             if (!room.loadingPromise) {
               room.loadingPromise = fetch(`${CF_WORKER_URL}/api/farm-world?room_id=${roomId}`)
@@ -141,12 +210,7 @@ wss.on('connection', (ws, req) => {
                   if (json.success && json.data) {
                     room.house_level = parseInt(json.data.house_level) || 1;
                     room.farm_coins = parseInt(json.data.farm_coins) || 0;
-                    
-                    // ==========================================================================
-                    // 🔥 THÔNG MẠCH TRUNG CHUYỂN: Hốt danh sách thành viên D1 từ Worker về RAM Render
-                    // ==========================================================================
                     room.room_members = json.data.room_members || [];
-                    // ==========================================================================
 
                     try {
                       room.inventory = typeof json.data.inventory === 'string' ? JSON.parse(json.data.inventory) : (json.data.inventory || {});
@@ -161,38 +225,31 @@ wss.on('connection', (ws, req) => {
                 })
                 .catch(err => {
                   console.error(`🚨 [D1 LOAD ERROR] Lỗi bốc dữ liệu phòng ${roomId}, dùng tạm mặc định:`, err);
-                  room.isLoadedFromD1 = true; 
+                  room.isLoadedFromD1 = true;
                 });
             }
             await room.loadingPromise;
           }
 
-          // ==========================================================================
-          // 🛠️ ĐỊNH VỊ CHỈ SỐ CÁ NHÂN TỪ D1: Quét sạch sành sanh cả Xu thường và Thể lực cá nhân
-          // ==========================================================================
           const myD1Members = room.room_members.find(m => m.username && m.username.toString().trim() === myUsername.toString().trim());
           const liveFarmEnergy = (myD1Members && myD1Members.farm_energy !== null && myD1Members.farm_energy !== undefined) ? parseInt(myD1Members.farm_energy) : 100;
-          const liveUserCoins = (myD1Members && myD1Members.coins !== null && myD1Members.coins !== undefined) ? parseInt(myD1Members.coins) : 0; 
-          // ==========================================================================
+          const liveUserCoins = (myD1Members && myD1Members.coins !== null && myD1Members.coins !== undefined) ? parseInt(myD1Members.coins) : 0;
 
-          // Ghim người chơi này vào danh sách nhân sự ONLINE của Room trong RAM
           room.players[myUsername] = {
             ws: ws,
             uid: myUsername,
             skin: skinId,
             x: 0,
             farm_energy: liveFarmEnergy,
-            coins: liveUserCoins // 👈 GĂM TIỀN XU THƯỜNG CÁ NHÂN LÊN BỆ PHÓNG RAM RENDER
+            coins: liveUserCoins
           };
 
-          // Nhịp A: Trả trạng thái toàn cục của phòng về máy đứa vừa vào để Cocos vẽ Map
           const activePlayersList = Object.values(room.players).map(p => ({
             uid: p.uid,
             skin: p.skin,
             x: p.x
           }));
 
-          // 📡 VÁ MẠCH PHÁT LOA: Chuyển tiếp đồng thời mảng thành viên, Thể lực, và cả Xu thường cá nhân cục bộ
           ws.send(JSON.stringify({
             action: 'sync_room_state',
             house_level: room.house_level,
@@ -201,10 +258,9 @@ wss.on('connection', (ws, req) => {
             active_players: activePlayersList,
             room_members: room.room_members,
             farm_energy: room.players[myUsername].farm_energy,
-            coins: room.players[myUsername].coins // 👈 PHÓNG ĐẦY ĐỦ XU THƯỜNG XUỐNG COCOS NẠP HUD CÁ NHÂN
+            coins: room.players[myUsername].coins
           }));
 
-          // Nhịp B: Phát loa báo cho các đứa còn lại biết để đúc xác Clone nhân vật mới
           broadcastToRoom(roomId, myUsername, {
             action: 'user_joined',
             uid: myUsername,
@@ -214,7 +270,6 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // 🕹️ MẠCH 2: ĐỒNG BỘ CHẠY CHẠY REALTIME
         case 'move': {
           if (!myUsername || !rooms[roomId]) return;
           const room = rooms[roomId];
@@ -232,7 +287,6 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // 📥 MẠCH 3: HỌC SINH NỘP ĐỒ VÀ HẠCH TOÁN NHÂN 10 TIỀN VÀO KÉT CHUNG PHÒNG CHƠI
         case 'add_item': {
           if (!myUsername || !rooms[roomId]) return;
           const room = rooms[roomId];
@@ -251,16 +305,13 @@ wss.on('connection', (ws, req) => {
           broadcastToRoom(roomId, null, {
             action: 'inventory_updated',
             inventory: room.inventory,
-            farm_coins: room.farm_coins 
+            farm_coins: room.farm_coins
           });
 
-          saveRoomToD1Background(roomId, room, myUsername, 0, false);
+          saveRoomToD1Background(roomId, room, myUsername, 0, false, 0);
           break;
         }
 
-        // ==========================================================================
-        // 🪓 MẠCH 5: ĐỒNG BỘ HOẠT ẢNH VUNG DỤNG CỤ LAO ĐỘNG CỦA ĐỒNG ĐỘI REALTIME
-        // ==========================================================================
         case 'sync_user_tool': {
           if (!myUsername || !rooms[roomId]) return;
           msg.uid = myUsername;
@@ -268,9 +319,6 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // ==========================================================================
-        // 🎁 MẠCH 6: ĐỒNG BỘ HIỆU ỨNG QUÀ BAY DIỆN RỘNG (COOP CELEBRATION)
-        // ==========================================================================
         case 'sync_user_vfx': {
           if (!myUsername || !rooms[roomId]) return;
           msg.uid = myUsername;
@@ -278,11 +326,6 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // ==========================================================================
-        // 🗣️ MẠCH 7 ĐÓN ĐẦU: TRUYỀN TIẾP TRẠNG THÁI MIC NÓI CHUYỆN (VOICE REALTIME BROADCAST)
-        // Khi máy local đè/nhả phím nói, gói tin truyền qua đây sẽ tự động dội ngược xuống
-        // clone của toàn phòng mà không kích hoạt ghi file hay chạm ổ cứng D1.
-        // ==========================================================================
         case 'sync_voice_status': {
           if (!myUsername || !rooms[roomId]) return;
           msg.uid = myUsername;
@@ -291,76 +334,103 @@ wss.on('connection', (ws, req) => {
         }
 
         // ==========================================================================
-        // 🏰 MẠCH 4: NÂNG CẤP NHÀ VÀ PHÁT THƯỞNG XU ĐỒNG LOẠT CHO TOÀN BỘ THÀNH VIÊN (MMO COOP)
-        // Cập nhật RAM cache diện rộng và kích hoạt cờ hiệu gửi chỉ thị ghi đè xuống D1 Cloudflare
+        // 🏰 [ĐÃ VÁ TOÀN BỘ] MẠCH NÂNG CẤP NHÀ:
+        // - Dùng công thức ĐỘNG từ Sheet (hỗ trợ vô hạn cấp, không còn dừng ở cấp 3)
+        // - Kiểm tra ĐẦY ĐỦ cả nguyên liệu VÀ Xu farm (trước đây bỏ qua Xu farm)
+        // - Nếu thất bại: PHẢN HỒI RÕ LÝ DO về đúng người bấm, không còn im lặng
+        // - Thưởng cả Xu thường VÀ Xu Upgrade cho toàn bộ thành viên
         // ==========================================================================
         case 'upgrade_house': {
           if (!myUsername || !rooms[roomId]) return;
           const room = rooms[roomId];
           const currentLv = room.house_level;
-          const formula = UPGRADE_FORMULAS[currentLv];
+          const formula = UPGRADE_FORMULAS_DYNAMIC[currentLv.toString()];
 
-          if (!formula) return; 
+          if (!formula) {
+            ws.send(JSON.stringify({
+              action: 'upgrade_failed',
+              reason: _formulasReady
+                ? 'Nhà đã đạt cấp tối đa hiện có trong cấu hình Sheet!'
+                : 'Hệ thống công thức nâng cấp chưa tải xong, thử lại sau ít giây!'
+            }));
+            console.warn(`⚠️ [Nâng cấp] [${myUsername}] yêu cầu nâng cấp cấp ${currentLv}, nhưng không tìm thấy công thức (formulasReady=${_formulasReady}).`);
+            return;
+          }
 
-          let isSatisfied = true;
+          // Kiểm tra nguyên liệu
+          let missingParts = [];
           for (let i = 0; i < formula.items.length; i++) {
             const reqItem = formula.items[i];
             const reqAmount = formula.amounts[i];
             const currentStock = room.inventory[reqItem] || 0;
             if (currentStock < reqAmount) {
-              isSatisfied = false;
-              break;
+              missingParts.push(`${reqItem} (${currentStock}/${reqAmount})`);
             }
           }
 
-          if (isSatisfied) {
-            // 1. Khấu trừ kho đồ tài nguyên chung trên RAM sảnh
-            for (let i = 0; i < formula.items.length; i++) {
-              const reqItem = formula.items[i];
-              room.inventory[reqItem] -= formula.amounts[i];
-            }
-            room.house_level += 1;
+          // 🆕 Kiểm tra Xu Farm (TRƯỚC ĐÂY SERVER BỎ QUA HOÀN TOÀN ĐIỀU KIỆN NÀY)
+          if (room.farm_coins < formula.reqFarmCoin) {
+            missingParts.push(`Xu Farm (${room.farm_coins}/${formula.reqFarmCoin})`);
+          }
 
-            const rewardCoins = formula.reward_coins || 50;
-            console.log(`🏰 [NÂNG CẤP GUILD] Học sinh [${myUsername}] nâng nhà lên cấp ${room.house_level}. Tiến hành phát thưởng +${rewardCoins} xu cho TOÀN BỘ thành viên!`);
-
-            // 2. PHÁT THƯỞNG ĐỒNG LOẠT: Cộng xu vào mảng thành viên tĩnh gốc room_members (Dữ liệu nền)
-            if (room.room_members && Array.isArray(room.room_members)) {
-              room.room_members.forEach(member => {
-                if (member) {
-                  member.coins = (parseInt(member.coins) || 0) + rewardCoins;
-                }
-              });
-            }
-
-            // 3. ĐỒNG BỘ ONLINE: Cộng xu trực tiếp cho các tài khoản đang kết nối thời gian thực trên RAM
-            for (const username in room.players) {
-              if (room.players[username]) {
-                room.players[username].coins = (parseInt(room.players[username].coins) || 0) + rewardCoins;
-              }
-            }
-
-            const activePlayersList = Object.values(room.players).map(p => ({
-              uid: p.uid,
-              skin: p.skin,
-              x: p.x
+          if (missingParts.length > 0) {
+            ws.send(JSON.stringify({
+              action: 'upgrade_failed',
+              reason: `Chưa đủ điều kiện nâng cấp! Còn thiếu: ${missingParts.join(', ')}`
             }));
-
-            // 4. PHÁT LOA KHÔNG Ô NHIỄM (Zero-Pollution Broadcast):
-            // Tuyệt đối KHÔNG đính kèm trường "coins: ..." trôi nổi ở ngoài cùng gói tin nữa.
-            // Máy Client Cocos nhận được room_members mới sẽ tự chạy vòng lặp tìm đúng tên mình để nảy số.
-            broadcastToRoom(roomId, null, {
-              action: 'sync_room_state',
-              house_level: room.house_level,
-              inventory: room.inventory,
-              farm_coins: room.farm_coins,
-              active_players: activePlayersList,
-              room_members: room.room_members // 👈 Mảng này mang theo số tiền mới tinh của cả phòng hạ cánh an toàn xuống Client
-            });
-
-            // 5. KÍCH HOẠT CHỈ THỊ BỀN VỮNG: Bắn Post API báo cờ hiệu is_guild_reward = true xuống Worker xử lý SQL
-            saveRoomToD1Background(roomId, room, myUsername, rewardCoins, true);
+            console.warn(`⚠️ [Nâng cấp] [${myUsername}] thiếu điều kiện: ${missingParts.join(', ')}`);
+            return;
           }
+
+          // ✅ Đủ điều kiện -> Khấu trừ nguyên liệu + Xu farm
+          for (let i = 0; i < formula.items.length; i++) {
+            room.inventory[formula.items[i]] -= formula.amounts[i];
+          }
+          room.farm_coins -= formula.reqFarmCoin;
+          room.house_level += 1;
+
+          const rewardCoins = formula.rewardCoin || 0;
+          const rewardUpgradeCoins = formula.rewardUpgradeCoin || 0;
+
+          console.log(`🏰 [NÂNG CẤP GUILD] [${myUsername}] nâng nhà lên cấp ${room.house_level}. Thưởng +${rewardCoins} Xu, +${rewardUpgradeCoins} Xu Upgrade cho toàn bộ thành viên!`);
+
+          if (room.room_members && Array.isArray(room.room_members)) {
+            room.room_members.forEach(member => {
+              if (member) {
+                member.coins = (parseInt(member.coins) || 0) + rewardCoins;
+                member.upgrade_coins = (parseInt(member.upgrade_coins) || 0) + rewardUpgradeCoins;
+              }
+            });
+          }
+
+          for (const username in room.players) {
+            if (room.players[username]) {
+              room.players[username].coins = (parseInt(room.players[username].coins) || 0) + rewardCoins;
+            }
+          }
+
+          // 🎁 Phần thưởng extra (item bonus, nếu cột I có giá trị)
+          if (formula.rewardExtraItem) {
+            const extraItemKey = formula.rewardExtraItem.replace(/^item_/, "");
+            room.inventory[extraItemKey] = (room.inventory[extraItemKey] || 0) + 1;
+          }
+
+          const activePlayersList = Object.values(room.players).map(p => ({
+            uid: p.uid,
+            skin: p.skin,
+            x: p.x
+          }));
+
+          broadcastToRoom(roomId, null, {
+            action: 'sync_room_state',
+            house_level: room.house_level,
+            inventory: room.inventory,
+            farm_coins: room.farm_coins,
+            active_players: activePlayersList,
+            room_members: room.room_members
+          });
+
+          saveRoomToD1Background(roomId, room, myUsername, rewardCoins, true, rewardUpgradeCoins);
           break;
         }
       }
@@ -369,7 +439,6 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  // 🔌 MẠCH 5: NGƯỜI CHƠI ĐÓNG MÁY / ĐỨT MẠNG / THOÁT PHÒNG
   ws.on('close', () => {
     if (myUsername && rooms[roomId] && rooms[roomId].players[myUsername]) {
       delete rooms[roomId].players[myUsername];
@@ -389,7 +458,7 @@ wss.on('connection', (ws, req) => {
 });
 
 // ==========================================
-// 🛠️ CÁ C HÀM PHỤ TRỢ ĐIỀU PHỐI ĐƯỜNG TRUYỀN SIÊU TỐC
+// 🛠️ CÁC HÀM PHỤ TRỢ ĐIỀU PHỐI ĐƯỜNG TRUYỀN SIÊU TỐC
 // ==========================================
 
 function broadcastToRoom(roomId, excludeUsername, packetObj) {
@@ -398,7 +467,7 @@ function broadcastToRoom(roomId, excludeUsername, packetObj) {
 
   const payload = JSON.stringify(packetObj);
   for (const username in room.players) {
-    if (username === excludeUsername) continue; 
+    if (username === excludeUsername) continue;
     const client = room.players[username];
     if (client.ws && client.ws.readyState === WebSocket.OPEN) {
       client.ws.send(payload);
@@ -406,8 +475,8 @@ function broadcastToRoom(roomId, excludeUsername, packetObj) {
   }
 }
 
-// 🛠️ Chuẩn hóa hạ tầng Write-Behind: Bổ sung cờ isGuildReward và rewardCoins gửi sang Cloudflare Worker
-function saveRoomToD1Background(roomId, room, upgradeUser = null, coinsEarned = 0, isGuildReward = false) {
+// 🆕 Thêm tham số upgradeCoinsEarned để đẩy luôn phần thưởng Xu Upgrade xuống D1
+function saveRoomToD1Background(roomId, room, upgradeUser = null, coinsEarned = 0, isGuildReward = false, upgradeCoinsEarned = 0) {
   fetch(`${CF_WORKER_URL}/api/farm-world/save`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -416,9 +485,10 @@ function saveRoomToD1Background(roomId, room, upgradeUser = null, coinsEarned = 
       house_level: room.house_level,
       farm_coins: room.farm_coins,
       inventory: room.inventory,
-      upgrade_user: upgradeUser,   
-      is_guild_reward: isGuildReward, // 👈 CẮM PHÍCH CHỈ THỊ: Báo Worker kích hoạt mạch SQL UPDATE diện rộng
-      reward_coins: coinsEarned       // 👈 Số tiền chuẩn chỉ bốc từ cấu hình để Worker nạp thẳng vào D1
+      upgrade_user: upgradeUser,
+      is_guild_reward: isGuildReward,
+      reward_coins: coinsEarned,
+      reward_upgrade_coins: upgradeCoinsEarned // 👈 MỚI
     })
   })
   .then(res => res.json())
