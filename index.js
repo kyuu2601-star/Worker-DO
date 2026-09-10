@@ -6,6 +6,55 @@ const { AccessToken } = require('livekit-server-sdk'); // 👈 SDK tạo token L
 // 🧠 KHO LƯU TRỮ TRẠNG THÁI TRÊN RAM (IN-MEMORY STATE)
 // ==========================================
 const rooms = {};
+const roomQueues = new Map();
+function enqueueRoom(roomId, operation) {
+  const previous = roomQueues.get(roomId) || Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
+  roomQueues.set(roomId, next);
+  next.finally(() => {
+    if (roomQueues.get(roomId) === next) roomQueues.delete(roomId);
+  }).catch(() => {});
+  return next;
+}
+
+async function editWorldFromAdmin(params) {
+  const roomId = String(params.room_id || '').trim();
+  if (!roomId) throw new Error('Thiếu room_id');
+  return enqueueRoom(roomId, async () => {
+    const room = rooms[roomId];
+    if (room && room.persistenceError) throw new Error('Phòng đang có lỗi lưu dữ liệu. Kiểm tra server trước khi chỉnh.');
+    const response = await fetch(CF_WORKER_URL + '/admin/cheat-world', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...params, room_id: roomId })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) throw new Error(result.message || 'Không lưu được chỉnh sửa');
+    if (room) {
+      // Block writes until the committed D1 state has been loaded successfully.
+      room.needsWorldRefresh = true;
+      await refreshWorld(roomId, room);
+    }
+    return result;
+  });
+}
+
+async function refreshWorld(roomId, room) {
+  const response = await fetch(CF_WORKER_URL + '/api/farm-world?room_id=' + encodeURIComponent(roomId));
+  const result = await response.json();
+  if (!response.ok || !result.success || !result.data) throw new Error('Đã yêu cầu chỉnh sửa nhưng chưa tải được trạng thái phòng; hãy kiểm tra lại trước khi gửi lại lệnh cộng/trừ.');
+  const data = result.data;
+  const inventory = typeof data.inventory === 'string' ? JSON.parse(data.inventory) : data.inventory;
+  room.house_level = data.house_level;
+  room.farm_coins = data.farm_coins;
+  room.inventory = inventory || {};
+  room.needsWorldRefresh = false;
+  broadcastToRoom(roomId, null, {
+    action: 'sync_room_state', house_level: room.house_level,
+    farm_coins: room.farm_coins, inventory: room.inventory,
+    room_members: room.room_members,
+    active_players: Object.values(room.players).map(p => ({ uid: p.uid, skin: p.skin, x: p.x }))
+  });
+}
 
 // ==========================================================================
 // 🏰 [ĐÃ VÁ] CÔNG THỨC NÂNG CẤP NHÀ: KHÔNG CÒN HARDCODE CỨNG NỮA
@@ -110,6 +159,23 @@ const server = createServer(async (req, res) => {
 
   const reqUrl = new URL(req.url, `http://${req.headers.host}`);
 
+  if (reqUrl.pathname === '/admin/cheat-world' && req.method === 'POST') {
+    try {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+        if (body.length > 65536) throw new Error('Yêu cầu quá lớn');
+      }
+      const result = await editWorldFromAdmin(JSON.parse(body));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, message: err.message }));
+    }
+    return;
+  }
+
   if (reqUrl.pathname === '/voice-token') {
     const room = reqUrl.searchParams.get('room');
     const username = reqUrl.searchParams.get('username');
@@ -183,6 +249,11 @@ wss.on('connection', (ws, req) => {
     try {
       const msg = JSON.parse(message);
 
+      await enqueueRoom(roomId, async () => {
+      if (['add_item', 'upgrade_house'].includes(msg.action) && rooms[roomId]) {
+        if (rooms[roomId].persistenceError) throw new Error('Phòng đang có lỗi lưu dữ liệu');
+        if (rooms[roomId].needsWorldRefresh) await refreshWorld(roomId, rooms[roomId]);
+      }
       switch (msg.action) {
         case 'join': {
           myUsername = msg.uid;
@@ -308,7 +379,7 @@ wss.on('connection', (ws, req) => {
             farm_coins: room.farm_coins
           });
 
-          saveRoomToD1Background(roomId, room, myUsername, 0, false, 0);
+          await saveRoomToD1Background(roomId, room, myUsername, 0, false, 0);
           break;
         }
 
@@ -430,17 +501,20 @@ wss.on('connection', (ws, req) => {
             room_members: room.room_members
           });
 
-          saveRoomToD1Background(roomId, room, myUsername, rewardCoins, true, rewardUpgradeCoins);
+          await saveRoomToD1Background(roomId, room, myUsername, rewardCoins, true, rewardUpgradeCoins);
           break;
         }
       }
+      });
     } catch (err) {
       console.error('🚨 Lỗi xử lý luồng gói tin gói mạng:', err);
     }
   });
 
   ws.on('close', () => {
+    enqueueRoom(roomId, async () => {
     if (myUsername && rooms[roomId] && rooms[roomId].players[myUsername]) {
+      if (rooms[roomId].players[myUsername].ws !== ws) return;
       delete rooms[roomId].players[myUsername];
       console.log(`🔌 [Thoát phòng] Bạn học [${myUsername}] đã ngắt kết nối rời sảnh.`);
 
@@ -454,6 +528,7 @@ wss.on('connection', (ws, req) => {
         console.log(`🧹 [Giải phóng RAM] Phòng ${roomId} không còn ai chơi, dọn dẹp bộ nhớ sạch bách.`);
       }
     }
+    }).catch(err => console.error('Room close:', err));
   });
 });
 
@@ -477,7 +552,7 @@ function broadcastToRoom(roomId, excludeUsername, packetObj) {
 
 // 🆕 Thêm tham số upgradeCoinsEarned để đẩy luôn phần thưởng Xu Upgrade xuống D1
 function saveRoomToD1Background(roomId, room, upgradeUser = null, coinsEarned = 0, isGuildReward = false, upgradeCoinsEarned = 0) {
-  fetch(`${CF_WORKER_URL}/api/farm-world/save`, {
+  return fetch(`${CF_WORKER_URL}/api/farm-world/save`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -496,10 +571,10 @@ function saveRoomToD1Background(roomId, room, upgradeUser = null, coinsEarned = 
     if (json.success) {
       console.log(`✅ [Write-Behind Thành công] DB D1 đồng bộ và lưu trữ hoàn tất tài sản phòng ${roomId}. Thưởng Guild: ${isGuildReward}`);
     } else {
-      console.error(`❌ [Write-Behind BỊ TỪ CHỐI] Worker báo lỗi xử lý D1:`, json.message);
+      throw new Error(json.message || 'D1 save rejected');
     }
   })
-  .catch(err => console.error(`🚨 [Write-Behind SẬP MẠCH] Lỗi kết nối HTTP nối sang Worker:`, err));
+  .catch(err => { room.persistenceError = true; throw err; });
 }
 
 const PORT = process.env.PORT || 10000;
